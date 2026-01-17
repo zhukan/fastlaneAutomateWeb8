@@ -1,0 +1,34 @@
+# Matchfile - 证书和描述文件管理配置（本地项目版本）
+# 更多信息: https://docs.fastlane.tools/actions/match/
+
+# ==================== 本地存储模式 ====================
+# 适用于不使用 Git 的本地项目
+
+# 证书类型：development / adhoc / appstore / enterprise
+type "appstore"
+
+# App 标识符
+app_identifier [ENV["APP_IDENTIFIER_PRODUCTION"]]
+
+# Apple ID
+username ENV["APPLE_ID"]
+
+# Team ID
+team_id ENV["TEAM_ID"]
+
+# ==================== 可选：使用 Match 本地存储 ====================
+# 如果想使用 Match 管理证书，取消下面的注释
+
+# 存储路径（本地目录）
+# git_url "file://#{Dir.home}/fastlane_certificates"
+
+# 存储模式
+# storage_mode "git"
+
+# 证书加密密码
+# 通过环境变量 MATCH_PASSWORD 设置
+
+# ==================== 注意事项 ====================
+# 本地项目推荐直接在 Xcode 中手动管理证书
+# 如果使用 Match，证书会存储在本地目录中
+# 请定期备份证书目录：~/fastlane_certificates

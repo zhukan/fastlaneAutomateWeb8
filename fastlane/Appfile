@@ -1,0 +1,28 @@
+# Appfile - Apple 账户和项目配置
+# 更多信息: https://docs.fastlane.tools/advanced/#appfile
+
+# Apple ID（开发者账号）
+apple_id ENV["APPLE_ID"]
+
+# Team ID（开发者团队 ID）
+team_id ENV["TEAM_ID"]
+
+# App Store Connect Team ID（如果有多个团队）
+itc_team_id ENV["ITC_TEAM_ID"]
+
+# 针对不同 lane 的配置
+for_platform :ios do
+  # 生产环境配置
+  for_lane :release do
+    app_identifier ENV["APP_IDENTIFIER_PRODUCTION"]
+  end
+
+  for_lane :deploy do
+    app_identifier ENV["APP_IDENTIFIER_PRODUCTION"]
+  end
+
+  # 测试环境配置（如需要）
+  for_lane :beta do
+    app_identifier ENV["APP_IDENTIFIER_PRODUCTION"]
+  end
+end

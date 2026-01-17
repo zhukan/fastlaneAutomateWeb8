@@ -1,0 +1,840 @@
+# Fastfile - iOS App Store 自动化发布系统
+# 更多信息: https://docs.fastlane.tools
+
+default_platform(:ios)
+
+# ==================== 全局配置 ====================
+
+# 使用 Scheme 名称作为输出文件名
+APP_NAME = ENV["SCHEME"] || "App"
+OUTPUT_DIRECTORY = "./build"
+
+# ==================== Helper 方法 ====================
+
+# 直接更新 Xcode 项目配置中的 MARKETING_VERSION
+def update_xcodeproj_version(version_number:, xcodeproj:)
+  require 'xcodeproj'
+  
+  # 处理相对路径：fastlane 在项目的 fastlane/ 子目录运行
+  # xcodeproj 在项目根目录，需要向上一级
+  xcodeproj_path = File.expand_path("../#{xcodeproj}", __dir__)
+  
+  UI.message "🔍 打开项目: #{xcodeproj_path}"
+  project = Xcodeproj::Project.open(xcodeproj_path)
+  
+  # 遍历所有 targets 和 configurations，更新 MARKETING_VERSION
+  project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['MARKETING_VERSION'] = version_number
+    end
+  end
+  
+  project.save
+  UI.success "✅ 已更新 MARKETING_VERSION 为: #{version_number}"
+end
+
+# ==================== 全局钩子 ====================
+
+# 所有 lane 执行前的准备工作
+before_all do |lane, options|
+  # 在 CI 环境中自动配置
+  setup_ci if ENV['CI']
+
+  # 输出当前环境信息
+  UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  UI.message "🚀 开始执行 Lane: #{lane}"
+  UI.message "📱 Bundle ID: #{ENV['APP_IDENTIFIER_PRODUCTION']}"
+  UI.message "🏗️  Scheme: #{ENV['SCHEME']}"
+  UI.message "📦 Configuration: #{ENV['CONFIGURATION']}"
+  UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+end
+
+# 所有 lane 执行成功后
+after_all do |lane, options|
+  UI.success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  UI.success "✅ Lane #{lane} 执行成功!"
+  UI.success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # 发送成功通知
+  send_success_notification(lane: lane)
+end
+
+# 错误处理
+error do |lane, exception, options|
+  UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  UI.error "❌ Lane #{lane} 执行失败!"
+  UI.error "错误信息: #{exception.message}"
+  UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # 发送错误通知
+  send_error_notification(
+    lane: lane,
+    error: exception.message
+  )
+end
+
+# ==================== iOS 平台 ====================
+
+platform :ios do
+
+  # ========== 版本号管理 ==========
+
+  desc "自动增加 Build Number"
+  desc "基于 App Store Connect 最新版本自动递增"
+  desc "支持首次发布和更新发布，自动智能处理"
+  lane :bump_build do
+    # 配置 API Key 认证（如果有配置）
+    setup_app_store_connect_api_key
+    
+    # 1. 获取本地当前 build number 作为基准
+    current_local_build = get_build_number(xcodeproj: ENV["PROJECT"]).to_i
+    UI.message "📱 当前本地 Build Number: #{current_local_build}"
+    
+    begin
+      # 2. 尝试从 App Store Connect 获取最新 build number
+      UI.message "🔍 正在查询 App Store Connect..."
+      latest_remote_build = app_store_build_number(
+        app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+        live: false  # false = 包括等待审核的版本
+      )
+      
+      UI.message "☁️  远程最新 Build Number: #{latest_remote_build}"
+      
+      # 3. 正常更新流程：远程 + 1
+      new_build = latest_remote_build + 1
+      
+      # 4. 安全检查：如果本地 >= 远程+1，使用本地+1
+      if current_local_build >= new_build
+        new_build = current_local_build + 1
+        UI.important "⚠️  本地 Build (#{current_local_build}) >= 远程 Build (#{latest_remote_build})"
+        UI.important "   使用本地值递增避免冲突"
+      end
+      
+      UI.success "✅ 更新发布模式"
+      
+    rescue => ex
+      # 5. 首次发布降级策略
+      if ex.message.include?("Could not find an app") || 
+         ex.message.include?("Could not find a build") ||
+         ex.message.include?("No value found")
+        UI.important "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        UI.important "🆕 首次发布检测"
+        UI.important "   App Store Connect 中未找到现有 Build"
+        UI.important "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        if current_local_build > 0
+          # 使用本地现有的 build number
+          new_build = current_local_build
+          UI.message "   保持本地 Build Number: #{new_build}"
+        else
+          # 完全新项目，从 1 开始
+          new_build = 1
+          UI.message "   使用初始 Build Number: 1"
+        end
+        
+      else
+        # 其他错误（网络、权限等），重新抛出
+        UI.error "获取远程 Build Number 失败: #{ex.message}"
+        raise ex
+      end
+    end
+    
+    # 6. 更新项目中的 build number
+    increment_build_number(
+      build_number: new_build,
+      xcodeproj: ENV["PROJECT"]
+    )
+    
+    UI.success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.success "📈 Build Number 已设置"
+    UI.success "   #{current_local_build} → #{new_build}"
+    UI.success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  end
+
+  desc "更新版本号（仅用于更新发布）"
+  desc "使用方式："
+  desc "  fastlane bump_version type:patch   # 1.0.0 → 1.0.1"
+  desc "  fastlane bump_version type:minor   # 1.0.0 → 1.1.0"
+  desc "  fastlane bump_version type:major   # 1.0.0 → 2.0.0"
+  desc "  fastlane bump_version version:1.2.3  # 手动指定版本号"
+  lane :bump_version do |options|
+    if options[:version]
+      # 手动指定版本号
+      target_version = ensure_version_format(options[:version])
+      
+      # 更新 xcodeproj 中的 MARKETING_VERSION
+      update_xcodeproj_version(
+        version_number: target_version,
+        xcodeproj: ENV["PROJECT"]
+      )
+      
+      # 尝试同时更新 Info.plist（可选）
+      begin
+        increment_version_number(
+          version_number: target_version,
+          xcodeproj: ENV["PROJECT"]
+        )
+      rescue => ex
+        UI.important "⚠️  agvtool 更新失败（可忽略）: #{ex.message}"
+      end
+      
+      new_version = target_version
+    else
+      # 自动递增：patch / minor / major
+      bump_type = options[:type] || "patch"
+      
+      # 获取当前版本号
+      current_version = nil
+      begin
+        current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+        UI.message "📱 当前版本: #{current_version}"
+      rescue => ex
+        UI.error "读取版本号失败: #{ex.message}"
+        # 设置默认版本后直接返回
+        update_xcodeproj_version(
+          version_number: "1.0.0",
+          xcodeproj: ENV["PROJECT"]
+        )
+        UI.success "📊 版本号已设置为: 1.0.0"
+        return
+      end
+      
+      # 检查并规范化版本号格式
+      if current_version.nil? || current_version.empty? || !current_version.match?(/^\d+\.\d+\.\d+$/)
+        UI.important "⚠️  版本号格式不标准: '#{current_version}'"
+        
+        # 规范化并计算递增后的版本
+        parts = current_version.to_s.split('.').map(&:to_i)
+        while parts.length < 3
+          parts << 0
+        end
+        
+        # 根据递增类型计算新版本
+        case bump_type
+        when "major"
+          parts[0] += 1
+          parts[1] = 0
+          parts[2] = 0
+        when "minor"
+          parts[1] += 1
+          parts[2] = 0
+        when "patch"
+          parts[2] += 1
+        end
+        
+        target_version = parts.join('.')
+        UI.important "   递增为: #{target_version}"
+        
+        # 更新版本号
+        update_xcodeproj_version(
+          version_number: target_version,
+          xcodeproj: ENV["PROJECT"]
+        )
+        
+        # 尝试同步 Info.plist
+        begin
+          increment_version_number(
+            version_number: target_version,
+            xcodeproj: ENV["PROJECT"]
+          )
+        rescue => ex
+          UI.important "⚠️  agvtool 更新失败（可忽略）: #{ex.message}"
+        end
+        
+        new_version = target_version
+      else
+        # 版本号格式正确，尝试使用 increment_version_number 递增
+        begin
+          increment_version_number(
+            bump_type: bump_type,
+            xcodeproj: ENV["PROJECT"]
+          )
+          new_version = get_version_number(xcodeproj: ENV["PROJECT"])
+          
+          # 同步更新 xcodeproj 中的 MARKETING_VERSION
+          update_xcodeproj_version(
+            version_number: new_version,
+            xcodeproj: ENV["PROJECT"]
+          )
+        rescue => ex
+          # agvtool 不可用，手动计算递增
+          UI.important "⚠️  agvtool 递增失败，使用手动计算: #{ex.message}"
+          
+          parts = current_version.split('.').map(&:to_i)
+          case bump_type
+          when "major"
+            parts[0] += 1
+            parts[1] = 0
+            parts[2] = 0
+          when "minor"
+            parts[1] += 1
+            parts[2] = 0
+          when "patch"
+            parts[2] += 1
+          end
+          
+          new_version = parts.join('.')
+          
+          # 直接更新 MARKETING_VERSION
+          update_xcodeproj_version(
+            version_number: new_version,
+            xcodeproj: ENV["PROJECT"]
+          )
+        end
+      end
+    end
+
+    UI.success "📊 版本号已更新为: #{new_version}"
+  end
+
+  # ========== 证书和签名管理 ==========
+
+  desc "自动获取证书和描述文件"
+  desc "使用 App Store Connect API Key 自动获取/创建证书"
+  lane :setup_certificates do
+    UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.message "🔐 自动获取证书和描述文件"
+    UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # 使用 API Key 认证
+    setup_app_store_connect_api_key
+    
+    begin
+      # 1. 自动获取/创建 Distribution 证书
+      UI.message "📜 检查/获取发布证书..."
+      cert(
+        development: false,
+        username: ENV["APPLE_ID"]
+      )
+      
+      # 2. 自动获取/创建 Provisioning Profile
+      UI.message "📄 检查/获取描述文件..."
+      sigh(
+        app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+        readonly: false
+      )
+      
+      UI.success "✅ 证书和描述文件已准备就绪"
+      
+    rescue => ex
+      UI.error "❌ 证书获取失败: #{ex.message}"
+      UI.important "   请检查 API Key 配置和网络连接"
+      raise ex
+    end
+  end
+  
+  desc "同步证书（Match 方式）"
+  lane :sync_certificates do |options|
+    # 检查是否配置了 Match
+    if ENV["USE_MATCH"] == "true"
+      match_type = options[:type] || "appstore"
+
+      match(
+        type: match_type,
+        readonly: is_ci,
+        app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"]
+      )
+
+      UI.success "✅ 证书同步完成"
+    else
+      UI.important "⚠️  未启用 Match，跳过证书同步"
+    end
+  end
+
+  # ========== 构建 ==========
+
+  desc "构建 IPA 文件"
+  desc "编译项目并生成用于发布的 IPA 文件"
+  lane :build do |options|
+    UI.message "开始构建 #{ENV['SCHEME']}..."
+
+    # 1. 证书管理
+    if ENV["USE_MATCH"] == "true"
+      # 使用 Match 管理证书
+      sync_certificates(type: "appstore")
+    elsif ENV["AUTO_FETCH_CERTIFICATES"] == "true"
+      # 自动获取证书（推荐）
+      setup_certificates
+    end
+
+    # 2. 更新代码签名设置（只针对主 target，避免影响 Pods）
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: ENV["PROJECT"],
+      team_id: ENV["TEAM_ID"],
+      bundle_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+      profile_name: Actions.lane_context[SharedValues::SIGH_NAME],
+      code_sign_identity: "Apple Distribution"
+    )
+    
+    # 3. 构建 App
+    build_app(
+      workspace: ENV["WORKSPACE"],
+      scheme: ENV["SCHEME"],
+      configuration: ENV["CONFIGURATION"],
+      export_method: ENV["EXPORT_METHOD"],
+      output_directory: OUTPUT_DIRECTORY,
+      output_name: "#{APP_NAME}.ipa",
+      clean: true,
+      include_bitcode: false,  # Xcode 14+ 已废弃 Bitcode
+      include_symbols: true,
+      # 导出时使用手动签名和 fastlane 获取的描述文件
+      export_options: {
+        method: ENV["EXPORT_METHOD"],
+        signingStyle: "manual",
+        signingCertificate: "Apple Distribution",
+        provisioningProfiles: {
+          ENV["APP_IDENTIFIER_PRODUCTION"] => Actions.lane_context[SharedValues::SIGH_NAME]
+        }
+      }
+    )
+
+    # 使用 build_app 生成的实际路径
+    ipa_path = Actions.lane_context[SharedValues::IPA_OUTPUT_PATH]
+    
+    if ipa_path && File.exist?(ipa_path)
+      ipa_size = File.size(ipa_path) / 1024.0 / 1024.0
+      UI.success "📦 构建完成!"
+      UI.success "   文件路径: #{ipa_path}"
+      UI.success "   文件大小: #{ipa_size.round(2)} MB"
+    else
+      UI.error "❌ IPA 文件不存在: #{ipa_path}"
+      raise "构建失败，IPA 文件未生成"
+    end
+  end
+
+  # ========== 测试发布 (TestFlight) ==========
+
+  desc "发布到 TestFlight 进行内部测试"
+  desc "自动更新 Build Number 并上传到 TestFlight"
+  lane :beta do
+    UI.message "开始 TestFlight 发布流程..."
+
+    # 1. 更新 Build Number
+    bump_build
+
+    # 2. 构建 IPA
+    build
+
+    # 3. 上传到 TestFlight
+    upload_to_testflight(
+      app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+      skip_waiting_for_build_processing: true,
+      skip_submission: true,
+      distribute_external: false,
+      changelog: get_changelog,
+      notify_external_testers: false
+    )
+
+    current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+    current_build = get_build_number(xcodeproj: ENV["PROJECT"])
+
+    UI.success "🚀 TestFlight 上传成功!"
+    UI.success "   版本: #{current_version} (#{current_build})"
+  end
+
+  # ========== 正式发布 (App Store) ==========
+
+  desc "发布到 App Store"
+  desc "使用方式："
+  desc "  fastlane release                                # 使用默认设置"
+  desc "  fastlane release version:2.0.0                  # 指定版本号"
+  desc "  fastlane release is_first_release:true          # 全新发布"
+  desc "  fastlane release is_first_release:false         # 升级发布"
+  desc "  fastlane release submit:true                    # 自动提交审核"
+  desc "  fastlane release screenshots:true               # 同时上传截图"
+  lane :release do |options|
+    UI.message "开始 App Store 发布流程..."
+
+    # 从参数获取发布类型（不再自动检测）
+    is_first_release = options[:is_first_release]
+    
+    if is_first_release.nil?
+      UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      UI.error "❌ 缺少必需参数: is_first_release"
+      UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      UI.error ""
+      UI.error "请指定发布类型："
+      UI.error "  全新发布: fastlane release is_first_release:true"
+      UI.error "  升级发布: fastlane release is_first_release:false"
+      UI.error ""
+      raise "缺少必需参数: is_first_release"
+    end
+    
+    # 转换为布尔值（命令行传入的是字符串）
+    is_first_release = (is_first_release.to_s.downcase == 'true')
+    
+    if is_first_release
+      UI.important "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      UI.important "🆕 全新发布模式"
+      UI.important "   这是首次发布此应用到 App Store"
+      UI.important "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+      UI.important "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      UI.important "🔄 升级发布模式"
+      UI.important "   更新已发布到 App Store 的应用"
+      UI.important "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    end
+
+    # 根据是否全新发布，采用不同的版本管理策略
+    if is_first_release
+      # ===== 全新发布：使用 Xcode 中已设置的版本号 =====
+      if options[:version]
+        # 用户明确指定了版本号，使用指定的版本
+        target_version = ensure_version_format(options[:version])
+        UI.message "🎯 使用指定版本号: #{target_version}"
+        
+        # 更新到项目中
+        update_xcodeproj_version(
+          version_number: target_version,
+          xcodeproj: ENV["PROJECT"]
+        )
+        
+        begin
+          increment_version_number(
+            version_number: target_version,
+            xcodeproj: ENV["PROJECT"]
+          )
+        rescue => ex
+          UI.important "⚠️  agvtool 更新失败（可忽略）: #{ex.message}"
+        end
+      else
+        # 未指定版本号：读取 Xcode 中已设置的版本号，保持不变
+        begin
+          current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+          
+          if current_version.nil? || current_version.empty?
+            # Xcode 中没有设置版本号，使用默认值 1.0.0
+            target_version = "1.0.0"
+            UI.important "⚠️  Xcode 中未设置版本号，使用默认值: #{target_version}"
+            
+            update_xcodeproj_version(
+              version_number: target_version,
+              xcodeproj: ENV["PROJECT"]
+            )
+            
+            begin
+              increment_version_number(
+                version_number: target_version,
+                xcodeproj: ENV["PROJECT"]
+              )
+            rescue => ex
+              UI.important "⚠️  agvtool 更新失败（可忽略）: #{ex.message}"
+            end
+          else
+            # Xcode 中已有版本号，规范化格式并保持
+            target_version = ensure_version_format(current_version)
+            
+            if target_version != current_version
+              UI.important "⚠️  版本号格式已规范化: #{current_version} → #{target_version}"
+              update_xcodeproj_version(
+                version_number: target_version,
+                xcodeproj: ENV["PROJECT"]
+              )
+              
+              begin
+                increment_version_number(
+                  version_number: target_version,
+                  xcodeproj: ENV["PROJECT"]
+                )
+              rescue => ex
+                UI.important "⚠️  agvtool 更新失败（可忽略）: #{ex.message}"
+              end
+            else
+              UI.success "✅ 使用 Xcode 中已设置的版本号: #{target_version}"
+              UI.message "   全新发布保持该版本号不变"
+            end
+          end
+        rescue => ex
+          UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          UI.error "❌ 版本号配置失败"
+          UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          UI.error ""
+          UI.error "错误信息: #{ex.message}"
+          UI.error ""
+          UI.error "请检查："
+          UI.error "1. 项目路径是否正确: #{ENV['PROJECT']}"
+          UI.error "2. Xcode → Target → General → Version 字段"
+          UI.error "3. Build Settings → Marketing Version"
+          UI.error ""
+          UI.error "或手动指定版本号："
+          UI.error "  fastlane release is_first_release:true version:1.0.0"
+          UI.error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          raise ex
+        end
+      end
+    else
+      # ===== 升级发布：根据参数递增或保持版本号 =====
+      if options[:version]
+        # 手动指定版本号
+        bump_version(version: options[:version])
+      elsif options[:type]
+        # 自动递增（patch/minor/major）
+        bump_version(type: options[:type])
+      else
+        # 不更新版本号，只更新 Build Number
+        current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+        UI.message "📊 保持当前版本号: #{current_version}"
+        UI.message "   仅更新 Build Number"
+      end
+    end
+
+    # 2. 更新 Build Number
+    bump_build
+
+    # 3. 构建 IPA
+    build
+
+    # 4. 上传到 App Store Connect
+    upload_to_app_store(
+      app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+      ipa: "#{OUTPUT_DIRECTORY}/#{APP_NAME}.ipa",
+      skip_screenshots: options[:screenshots] != true,
+      skip_metadata: options[:metadata] != true,
+      submit_for_review: options[:submit] == true,
+      automatic_release: false,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      submission_information: {
+        add_id_info_uses_idfa: false
+      }
+    )
+
+    # 5. 完成
+    current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+    current_build = get_build_number(xcodeproj: ENV["PROJECT"])
+
+    UI.success "🎉 App Store 发布完成!"
+    UI.success "   版本: #{current_version} (#{current_build})"
+
+    if options[:submit] == true
+      UI.success "   已自动提交审核"
+    else
+      UI.important "⚠️  请手动在 App Store Connect 中提交审核"
+    end
+  end
+
+  # ========== 一键发布 ==========
+
+  desc "一键完整发布流程"
+  desc "包含构建、上传到 App Store，但不自动提交审核"
+  lane :deploy do
+    release(
+      screenshots: false,
+      metadata: false,
+      submit: false
+    )
+  end
+
+  # ========== 辅助功能 ==========
+
+  desc "下载 App Store 元数据和截图"
+  desc "从 App Store Connect 下载现有的元数据到本地"
+  lane :download_metadata do
+    deliver(
+      app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+      download_metadata: true,
+      download_screenshots: true,
+      force: true
+    )
+
+    UI.success "✅ 元数据已下载到 fastlane/metadata 目录"
+  end
+
+  desc "仅上传元数据"
+  desc "不上传 IPA，仅更新 App Store 的文本和截图"
+  lane :upload_metadata do
+    upload_to_app_store(
+      app_identifier: ENV["APP_IDENTIFIER_PRODUCTION"],
+      skip_binary_upload: true,
+      skip_screenshots: false,
+      force: true
+    )
+
+    UI.success "✅ 元数据上传完成"
+  end
+
+  desc "清理构建产物"
+  desc "删除 DerivedData 和构建输出目录"
+  lane :clean do
+    UI.message "开始清理..."
+
+    # 清理 DerivedData
+    clear_derived_data
+
+    # 删除构建输出目录
+    sh "rm -rf ../#{OUTPUT_DIRECTORY}" if File.exist?("../#{OUTPUT_DIRECTORY}")
+
+    UI.success "🧹 清理完成"
+  end
+
+  desc "查看当前版本信息"
+  desc "显示当前项目的版本号和 Build Number"
+  lane :version_info do
+    current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+    current_build = get_build_number(xcodeproj: ENV["PROJECT"])
+
+    UI.header "📱 版本信息"
+    UI.message "App: #{ENV['APP_IDENTIFIER_PRODUCTION']}"
+    UI.message "Version: #{current_version}"
+    UI.message "Build: #{current_build}"
+    UI.message "Scheme: #{ENV['SCHEME']}"
+    UI.message "Configuration: #{ENV['CONFIGURATION']}"
+  end
+
+end
+
+# ==================== 私有辅助方法 ====================
+
+# 确保版本号格式正确（A.B.C 格式）
+def ensure_version_format(version)
+  return version if version.nil? || version.empty?
+  
+  parts = version.split('.')
+  while parts.length < 3
+    parts << '0'
+  end
+  
+  parts[0..2].join('.')
+end
+
+# 配置 App Store Connect API Key（如果有配置）
+def setup_app_store_connect_api_key
+  # 检查是否配置了 API Key
+  if ENV["APP_STORE_CONNECT_API_KEY_KEY_ID"] && 
+     ENV["APP_STORE_CONNECT_API_KEY_ISSUER_ID"] && 
+     ENV["APP_STORE_CONNECT_API_KEY_KEY_FILEPATH"]
+    
+    UI.message "🔑 使用 App Store Connect API Key 认证"
+    
+    app_store_connect_api_key(
+      key_id: ENV["APP_STORE_CONNECT_API_KEY_KEY_ID"],
+      issuer_id: ENV["APP_STORE_CONNECT_API_KEY_ISSUER_ID"],
+      key_filepath: ENV["APP_STORE_CONNECT_API_KEY_KEY_FILEPATH"],
+      duration: 1200, # 20 分钟有效期
+      in_house: false
+    )
+  else
+    UI.message "🔐 使用 Apple ID 密码认证"
+  end
+end
+
+# 获取变更日志
+def get_changelog
+  # 本地项目无 Git，使用默认更新说明
+  # 如需自定义，可在 fastlane/changelog.txt 中编写
+  changelog_file = File.join(File.dirname(__FILE__), "changelog.txt")
+
+  if File.exist?(changelog_file)
+    return File.read(changelog_file).strip
+  else
+    return "Bug fixes and improvements"
+  end
+end
+
+# 发送成功通知
+def send_success_notification(lane:)
+  current_version = get_version_number(xcodeproj: ENV["PROJECT"])
+  current_build = get_build_number(xcodeproj: ENV["PROJECT"])
+
+  message = "✅ #{lane} 执行成功!\n版本: #{current_version} (#{current_build})"
+
+  # Slack 通知
+  if ENV["SLACK_WEBHOOK_URL"] && !ENV["SLACK_WEBHOOK_URL"].empty?
+    begin
+      slack(
+        message: message,
+        success: true,
+        slack_url: ENV["SLACK_WEBHOOK_URL"],
+        channel: ENV["SLACK_CHANNEL"] || "#releases",
+        payload: {
+          "Lane" => lane.to_s,
+          "Version" => current_version,
+          "Build" => current_build,
+          "Time" => Time.now.strftime("%Y-%m-%d %H:%M:%S")
+        }
+      )
+      UI.success "📨 Slack 通知已发送"
+    rescue => ex
+      UI.error "Slack 通知发送失败: #{ex.message}"
+    end
+  end
+
+  # 钉钉通知
+  if ENV["DINGTALK_ACCESS_TOKEN"] && ENV["DINGTALK_NOTIFICATION_ENABLED"] == "true"
+    send_dingtalk_notification(
+      title: "🎉 构建成功",
+      message: message,
+      success: true
+    )
+  end
+end
+
+# 发送错误通知
+def send_error_notification(lane:, error:)
+  message = "❌ #{lane} 执行失败!\n错误: #{error}"
+
+  # Slack 通知
+  if ENV["SLACK_WEBHOOK_URL"] && !ENV["SLACK_WEBHOOK_URL"].empty?
+    begin
+      slack(
+        message: message,
+        success: false,
+        slack_url: ENV["SLACK_WEBHOOK_URL"],
+        channel: ENV["SLACK_CHANNEL"] || "#releases",
+        payload: {
+          "Lane" => lane.to_s,
+          "Error" => error,
+          "Time" => Time.now.strftime("%Y-%m-%d %H:%M:%S")
+        }
+      )
+      UI.success "📨 Slack 错误通知已发送"
+    rescue => ex
+      UI.error "Slack 通知发送失败: #{ex.message}"
+    end
+  end
+
+  # 钉钉通知
+  if ENV["DINGTALK_ACCESS_TOKEN"] && ENV["DINGTALK_NOTIFICATION_ENABLED"] == "true"
+    send_dingtalk_notification(
+      title: "❌ 构建失败",
+      message: message,
+      success: false
+    )
+  end
+end
+
+# 钉钉通知（自定义实现）
+def send_dingtalk_notification(title:, message:, success:)
+  require 'net/http'
+  require 'json'
+
+  url = URI("https://oapi.dingtalk.com/robot/send?access_token=#{ENV['DINGTALK_ACCESS_TOKEN']}")
+
+  # 构建 Markdown 消息
+  markdown_text = "### #{title}\n\n#{message}\n\n> 📅 时间: #{Time.now.strftime('%Y-%m-%d %H:%M:%S')}"
+
+  payload = {
+    msgtype: "markdown",
+    markdown: {
+      title: title,
+      text: markdown_text
+    }
+  }
+
+  http = Net::HTTP.new(url.host, url.port)
+  http.use_ssl = true
+  request = Net::HTTP::Post.new(url)
+  request["Content-Type"] = "application/json"
+  request.body = JSON.generate(payload)
+
+  response = http.request(request)
+
+  if response.code == "200"
+    UI.success "📨 钉钉通知已发送"
+  else
+    UI.error "钉钉通知发送失败: #{response.code}"
+  end
+rescue => ex
+  UI.error "钉钉通知发送异常: #{ex.message}"
+end
