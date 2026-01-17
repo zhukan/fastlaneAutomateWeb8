@@ -276,35 +276,18 @@ export class TargetAppMonitorService {
       
       console.log(`[TargetAppMonitor] 📋 从明道云共获取到 ${allRecords.length} 条记录`);
       
-      // 代码层面筛选最近 N 天的记录
-      const startDateTime = new Date(startDateStr + ' 00:00:00');
-      const filteredRecords = allRecords.filter((record: any) => {
-        if (!record.ctime) return false;
-        const recordTime = new Date(record.ctime);
-        return recordTime >= startDateTime;
-      });
+      // ⚠️  明道云目标包表可能没有 ctime 字段，因此不进行时间筛选
+      // 直接同步所有记录（目标包表数据量通常不大）
+      console.log(`[TargetAppMonitor] 💡 注意：由于明道云记录可能缺少创建时间字段，将同步所有记录`);
       
-      // 按创建时间倒序排序（最新的在前）
-      filteredRecords.sort((a: any, b: any) => {
-        const timeA = new Date(a.ctime).getTime();
-        const timeB = new Date(b.ctime).getTime();
-        return timeB - timeA;
-      });
+      const hapRecords = allRecords;
       
-      console.log(`[TargetAppMonitor] 🔍 筛选后：${filteredRecords.length} 条记录（最近 ${daysToSync} 天）`);
-      
-      if (filteredRecords.length > 0) {
-        console.log(`[TargetAppMonitor] 📝 第一条记录创建时间: ${filteredRecords[0].ctime}`);
-        console.log(`[TargetAppMonitor] 📝 最后一条记录创建时间: ${filteredRecords[filteredRecords.length - 1].ctime}`);
-      }
-
-      if (filteredRecords.length === 0) {
-        console.log(`[TargetAppMonitor] ⚠️  最近 ${daysToSync} 天没有新增目标包记录`);
+      if (hapRecords.length === 0) {
+        console.log(`[TargetAppMonitor] ⚠️  明道云目标包表为空`);
         return { synced: 0, updated: 0 };
       }
       
-      // 使用筛选后的记录
-      const hapRecords = filteredRecords;
+      console.log(`[TargetAppMonitor] 📝 准备同步 ${hapRecords.length} 条记录`);
 
       // 查询所有已存在的记录，保留手动修改标记
       const hapRowIds = hapRecords.map((record: any) => record.rowid || record.rowId);
@@ -365,23 +348,101 @@ export class TargetAppMonitorService {
         return app;
       });
 
-      // 批量 upsert 到 Supabase
-      const { data: upsertData, error: upsertError } = await (this.supabaseClient as any).client
+      // 查询所有已存在的 app_id（用于去重）
+      const { data: existingAppsWithIds } = await (this.supabaseClient as any).client
         .from('target_apps')
-        .upsert(appsToUpsert, {
-          onConflict: 'hap_row_id',
-          ignoreDuplicates: false,
+        .select('app_id, hap_row_id')
+        .not('app_id', 'is', null);
+      
+      const existingAppIds = new Set(
+        existingAppsWithIds?.map((app: any) => app.app_id) || []
+      );
+      const existingHapRowIds = new Set(
+        existingAppsWithIds?.map((app: any) => app.hap_row_id) || []
+      );
+      
+      console.log(`[TargetAppMonitor] 📊 数据库中已存在 ${existingAppIds.size} 个 app_id`);
+      
+      // 分离新记录和更新记录
+      const newApps: any[] = [];
+      const updateApps: any[] = [];
+      const skippedApps: any[] = [];
+      const seenAppIds = new Set(existingAppIds); // 用于跟踪已见过的 app_id
+      
+      appsToUpsert.forEach((app: any) => {
+        if (existingHapRowIds.has(app.hap_row_id)) {
+          // 已存在的明道云记录，执行更新
+          updateApps.push(app);
+          // 更新操作不需要检查 app_id 重复，因为是按 hap_row_id 更新
+        } else if (app.app_id && seenAppIds.has(app.app_id)) {
+          // app_id 已存在（包括数据库中的和本批次中的），跳过以避免冲突
+          skippedApps.push(app);
+        } else {
+          // 新记录
+          newApps.push(app);
+          // 记录这个 app_id，防止本批次内重复
+          if (app.app_id) {
+            seenAppIds.add(app.app_id);
+          }
+        }
+      });
+      
+      console.log(`[TargetAppMonitor] 📝 分类结果:`);
+      console.log(`  - 新记录: ${newApps.length}`);
+      console.log(`  - 更新记录: ${updateApps.length}`);
+      console.log(`  - 跳过记录（app_id 重复）: ${skippedApps.length}`);
+      
+      if (skippedApps.length > 0) {
+        console.log(`[TargetAppMonitor] ⚠️  跳过的 app_id 示例（前5个）:`);
+        skippedApps.slice(0, 5).forEach((app: any) => {
+          console.log(`  - ${app.app_name} (${app.app_id})`);
         });
-
-      if (upsertError) {
-        throw new Error(`Supabase upsert 失败: ${upsertError.message}`);
       }
-
-      console.log(`[TargetAppMonitor] ✅ 同步完成：${appsToUpsert.length} 条记录已同步到 Supabase`);
+      
+      let successCount = 0;
+      let errorCount = 0;
+      
+      // 先处理更新记录
+      if (updateApps.length > 0) {
+        const { data, error } = await (this.supabaseClient as any).client
+          .from('target_apps')
+          .upsert(updateApps, {
+            onConflict: 'hap_row_id',
+            ignoreDuplicates: false,
+          });
+        
+        if (error) {
+          console.error(`[TargetAppMonitor] ⚠️  更新记录失败: ${error.message}`);
+          errorCount += updateApps.length;
+        } else {
+          successCount += updateApps.length;
+        }
+      }
+      
+      // 再处理新记录
+      if (newApps.length > 0) {
+        const { data, error } = await (this.supabaseClient as any).client
+          .from('target_apps')
+          .insert(newApps);
+        
+        if (error) {
+          console.error(`[TargetAppMonitor] ⚠️  插入新记录失败: ${error.message}`);
+          errorCount += newApps.length;
+        } else {
+          successCount += newApps.length;
+        }
+      }
+      
+      console.log(`[TargetAppMonitor] ✅ 同步完成:`);
+      console.log(`  - 成功: ${successCount} 条`);
+      console.log(`  - 跳过: ${skippedApps.length} 条`);
+      if (errorCount > 0) {
+        console.log(`  - 失败: ${errorCount} 条`);
+      }
       
       return {
         synced: hapRecords.length,
-        updated: appsToUpsert.length,
+        updated: successCount,
       };
     } catch (error: any) {
       console.error('[TargetAppMonitor] ❌ 同步失败:', error.message);
