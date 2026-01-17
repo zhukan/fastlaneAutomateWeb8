@@ -16,6 +16,7 @@ import { AppRemovalInvestigationService } from './app-removal-investigation-serv
 import { TestService } from './test-service';
 import { UmengClient } from './umeng-client';
 import { supabaseClient } from './supabase-client';
+import { ExternalReleaseSync } from './external-release-sync';
 import { Project } from './types';
 
 export class FastlaneAgentServer {
@@ -32,6 +33,7 @@ export class FastlaneAgentServer {
   private appComparisonService: AppComparisonService | null = null;
   private removalInvestigationService: AppRemovalInvestigationService | null = null;
   private testService: TestService | null = null;
+  private externalReleaseSync: ExternalReleaseSync | null = null;
   private port: number;
 
   constructor(port: number = 3000) {
@@ -102,12 +104,17 @@ export class FastlaneAgentServer {
         // 初始化测试服务（6.0 版本新增）
         this.testService = new TestService(this.hapClient);
         console.log('[Server] ✅ 测试服务已初始化');
+        
+        // 初始化外部审核同步服务（8.0 版本新增）
+        this.externalReleaseSync = new ExternalReleaseSync(this.hapClient, supabaseClient);
+        console.log('[Server] ✅ 外部审核同步服务已初始化');
       } else {
         this.reviewMonitor = null;
         this.appRemovalMonitor = null;
         this.targetAppMonitor = null;
         this.appComparisonService = null;
         this.removalInvestigationService = null;
+        this.externalReleaseSync = null;
         console.log('[Server] ⚠️  Supabase 未配置，跳过审核监控和下架监控功能');
       }
     } else {
@@ -117,6 +124,7 @@ export class FastlaneAgentServer {
       this.targetAppMonitor = null;
       this.appComparisonService = null;
       this.removalInvestigationService = null;
+      this.externalReleaseSync = null;
       console.log('[Server] ⚠️  明道云未配置，跳过自动查询、审核监控和下架监控功能');
     }
 
@@ -763,7 +771,8 @@ export class FastlaneAgentServer {
           version: project.currentVersion || '',
           build_number: project.currentBuild || '',
           is_first_release: isFirstRelease || false,
-          apple_id: project.appleId,
+          account_email: project.appleId, // 账号邮箱
+          app_store_id: null, // 补录时没有 App Store ID
           team_id: project.teamId,
           itc_team_id: project.itcTeamId,
           api_key_id: project.apiKeyId,
@@ -876,6 +885,33 @@ export class FastlaneAgentServer {
       } catch (error: any) {
         console.error('[API] ❌ 获取监控状态失败:', error.message);
         res.status(500).json({ error: error.message });
+      }
+    });
+
+    // ============================================================================
+    // 外部审核同步 API（8.0 版本新增）
+    // ============================================================================
+
+    // 手动同步外部提交的审核记录
+    this.app.post('/api/releases/sync-external', async (req: Request, res: Response) => {
+      if (!this.externalReleaseSync) {
+        return res.status(503).json({ 
+          success: false,
+          error: '外部审核同步服务未初始化' 
+        });
+      }
+
+      try {
+        console.log('[API] 🔄 开始同步外部审核记录...');
+        const result = await this.externalReleaseSync.syncExternalReleases();
+        console.log('[API] ✅ 外部审核同步完成');
+        res.json(result);
+      } catch (error: any) {
+        console.error('[API] ❌ 外部审核同步失败:', error.message);
+        res.status(500).json({ 
+          success: false,
+          error: error.message 
+        });
       }
     });
 

@@ -39,6 +39,46 @@ export default function OverviewPage() {
     },
   });
 
+  // 外部审核同步 mutation（8.0 版本新增）
+  const syncExternalMutation = useMutation({
+    mutationFn: async () => {
+      return await agentClient.syncExternalReleases();
+    },
+    onSuccess: (result) => {
+      if (!result.success) {
+        toast.error(`同步失败: ${result.error}`);
+        return;
+      }
+
+      const { newCount, existCount, failCount, failedApps } = result.data!;
+      
+      if (failCount > 0) {
+        // 部分失败
+        const failedList = failedApps.map(app => `${app.appName} v${app.version}: ${app.error}`).join('\n');
+        toast.warning(
+          `同步完成（部分失败）`,
+          {
+            description: `✅ 新增: ${newCount}条 | ℹ️ 已存在: ${existCount}条 | ❌ 失败: ${failCount}条\n\n失败详情:\n${failedList}`,
+            duration: 10000,
+          }
+        );
+      } else {
+        // 全部成功
+        toast.success(
+          `同步完成！`,
+          {
+            description: `新增: ${newCount}条 | 已存在: ${existCount}条`,
+          }
+        );
+      }
+      
+      queryClient.invalidateQueries({ queryKey: ['releases', 'recent'] });
+    },
+    onError: (error: Error) => {
+      toast.error(`同步失败: ${error.message}`);
+    },
+  });
+
   // 手动刷新审核状态
   const refreshMutation = useMutation({
     mutationFn: async (releaseId: string) => {
@@ -198,11 +238,31 @@ export default function OverviewPage() {
                   最近 10 条发布记录
                 </p>
               </div>
-              <Link href="/releases">
-                <Button variant="outline" size="sm">
-                  查看全部
+              <div className="flex gap-2">
+                <Button 
+                  variant="outline" 
+                  size="sm"
+                  onClick={() => syncExternalMutation.mutate()}
+                  disabled={syncExternalMutation.isPending}
+                >
+                  {syncExternalMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      同步中...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      同步外部审核
+                    </>
+                  )}
                 </Button>
-              </Link>
+                <Link href="/releases">
+                  <Button variant="outline" size="sm">
+                    查看全部
+                  </Button>
+                </Link>
+              </div>
             </CardHeader>
             <CardContent>
               {releasesLoading ? (

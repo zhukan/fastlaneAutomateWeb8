@@ -125,11 +125,50 @@ export class ReviewMonitor {
     console.log(`[ReviewMonitor] 🔍 检查发布记录: ${release.app_name} v${release.version}`);
 
     try {
-      // 1. 从明道云获取账号配置
-      const accountConfig = await this.hapClient.getAppleAccountByBundleId(release.bundle_id);
-      
-      if (!accountConfig) {
-        throw new Error(`无法获取 Bundle ID ${release.bundle_id} 的账号配置`);
+      // 1. 获取账号配置（优先使用 release 表中的数据，减少明道云 API 调用）
+      let accountConfig: {
+        appleId: string;
+        teamId: string;
+        apiKeyId: string;
+        apiKeyIssuerId: string;
+        apiKeyContent: string;
+        itcTeamId?: string;
+      };
+
+      // 1.1 优先使用 releases 表中存储的 API Key（PRD 8.0）
+      if (
+        release.api_key_id &&
+        release.api_key_issuer_id &&
+        release.api_key_content &&
+        release.team_id &&
+        release.account_email
+      ) {
+        console.log(`[HAP] 使用 releases 表中存储的 API Key 配置`);
+        accountConfig = {
+          appleId: release.account_email,
+          teamId: release.team_id,
+          apiKeyId: release.api_key_id,
+          apiKeyIssuerId: release.api_key_issuer_id,
+          apiKeyContent: release.api_key_content,
+          itcTeamId: release.itc_team_id,
+        };
+      } else {
+        // 1.2 回退到明道云查询（兼容旧数据）
+        console.log(`[HAP] releases 表中 API Key 信息不完整，回退到明道云查询`);
+        const hapAccountConfig = await this.hapClient.getAppleAccountByBundleId(release.bundle_id);
+        
+        if (!hapAccountConfig) {
+          throw new Error(`无法获取 Bundle ID ${release.bundle_id} 的账号配置（releases 表和明道云均无有效数据）`);
+        }
+
+        accountConfig = {
+          appleId: hapAccountConfig.appleId,
+          teamId: hapAccountConfig.teamId,
+          apiKeyId: hapAccountConfig.apiKeyId,
+          apiKeyIssuerId: hapAccountConfig.apiKeyIssuerId,
+          apiKeyContent: hapAccountConfig.apiKeyContent,
+          itcTeamId: hapAccountConfig.itcTeamId,
+        };
       }
 
       // 2. 查询 App Store 审核状态

@@ -194,7 +194,8 @@ export class TaskExecutor extends EventEmitter {
               version: project.currentVersion || '',
               build_number: project.currentBuild || '',
               is_first_release: task.options?.isFirstRelease || false,
-              apple_id: project.appleId,
+              account_email: project.appleId, // 账号邮箱
+              app_store_id: null, // 通过 fastlane 发布时没有 App Store ID
               team_id: project.teamId,
               itc_team_id: project.itcTeamId,
               api_key_id: project.apiKeyId,

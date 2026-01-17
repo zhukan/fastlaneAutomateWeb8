@@ -8,7 +8,7 @@ export function TopBar() {
     <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6">
       {/* 左侧：系统名称 */}
       <div>
-        <h1 className="text-xl font-semibold text-gray-900">Fastlane UI</h1>
+        <h1 className="text-xl font-semibold text-gray-900">Fastlane UI 8</h1>
         <p className="text-xs text-gray-500">iOS 应用发布管理系统</p>
       </div>
 

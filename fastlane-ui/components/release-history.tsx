@@ -66,7 +66,7 @@ export function ReleaseHistory({ projectId }: ReleaseHistoryProps) {
       const appNames = Array.from(new Set(allData.map((r) => r.app_name))).sort();
       const bundleIds = Array.from(new Set(allData.map((r) => r.bundle_id))).sort();
       const appleIds = Array.from(
-        new Set(allData.map((r) => r.apple_id).filter((id): id is string => !!id))
+        new Set(allData.map((r) => r.account_email).filter((id): id is string => !!id))
       ).sort();
       const deployedBys = Array.from(
         new Set(
@@ -92,7 +92,7 @@ export function ReleaseHistory({ projectId }: ReleaseHistoryProps) {
         filtered = filtered.filter((r) => r.bundle_id === filters.bundleId);
       }
       if (filters.appleId && filters.appleId !== 'all') {
-        filtered = filtered.filter((r) => r.apple_id === filters.appleId);
+        filtered = filtered.filter((r) => r.account_email === filters.appleId);
       }
       if (filters.deployedBy && filters.deployedBy !== 'all') {
         filtered = filtered.filter(
@@ -261,7 +261,7 @@ export function ReleaseHistory({ projectId }: ReleaseHistoryProps) {
                   审核状态
                 </th>
                 <th className="text-left p-3 text-sm font-semibold text-gray-700">
-                  Apple ID
+                  开发者账号
                 </th>
                 <th className="text-left p-3 text-sm font-semibold text-gray-700">
                   时间
@@ -318,7 +318,7 @@ export function ReleaseHistory({ projectId }: ReleaseHistoryProps) {
                     />
                   </td>
                   <td className="p-3 text-sm text-gray-600">
-                    {release.apple_id || '-'}
+                    {release.account_email || '-'}
                   </td>
                   <td className="p-3 text-sm text-gray-600">
                     {formatDate(release.submitted_at)}

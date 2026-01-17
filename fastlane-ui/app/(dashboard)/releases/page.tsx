@@ -17,7 +17,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { supabase } from '@/lib/supabase';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import { Search, Download, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Search, Download, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 import { ReviewStatusBadge } from '@/components/review-status-badge';
 import { REVIEW_STATUS_CONFIG } from '@/lib/types';
@@ -63,6 +63,46 @@ export default function ReleasesPage() {
     },
     onError: (error: Error) => {
       toast.error(`批量操作失败: ${error.message}`);
+    },
+  });
+
+  // 外部审核同步 mutation（8.0 版本新增）
+  const syncExternalMutation = useMutation({
+    mutationFn: async () => {
+      return await agentClient.syncExternalReleases();
+    },
+    onSuccess: (result) => {
+      if (!result.success) {
+        toast.error(`同步失败: ${result.error}`);
+        return;
+      }
+
+      const { newCount, existCount, failCount, failedApps } = result.data!;
+      
+      if (failCount > 0) {
+        // 部分失败
+        const failedList = failedApps.map(app => `${app.appName} v${app.version}: ${app.error}`).join('\n');
+        toast.warning(
+          `同步完成（部分失败）`,
+          {
+            description: `✅ 新增: ${newCount}条 | ℹ️ 已存在: ${existCount}条 | ❌ 失败: ${failCount}条\n\n失败详情:\n${failedList}`,
+            duration: 10000,
+          }
+        );
+      } else {
+        // 全部成功
+        toast.success(
+          `同步完成！`,
+          {
+            description: `新增: ${newCount}条 | 已存在: ${existCount}条`,
+          }
+        );
+      }
+      
+      queryClient.invalidateQueries({ queryKey: ['releases', 'all'] });
+    },
+    onError: (error: Error) => {
+      toast.error(`同步失败: ${error.message}`);
     },
   });
 
@@ -199,10 +239,30 @@ export default function ReleasesPage() {
                   </span>
                 )}
               </CardTitle>
-              <Button variant="outline" size="sm">
-                <Download className="w-4 h-4 mr-2" />
-                导出
-              </Button>
+              <div className="flex gap-2">
+                <Button 
+                  variant="outline" 
+                  size="sm"
+                  onClick={() => syncExternalMutation.mutate()}
+                  disabled={syncExternalMutation.isPending}
+                >
+                  {syncExternalMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      同步中...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      同步外部审核
+                    </>
+                  )}
+                </Button>
+                <Button variant="outline" size="sm">
+                  <Download className="w-4 h-4 mr-2" />
+                  导出
+                </Button>
+              </div>
             </div>
 
             {/* 筛选器 */}
@@ -355,7 +415,7 @@ export default function ReleasesPage() {
                           监控
                         </th>
                         <th className="text-left py-3 px-4 font-medium text-gray-700">
-                          Apple ID
+                          开发者账号
                         </th>
                         <th className="text-left py-3 px-4 font-medium text-gray-700">
                           提交时间
@@ -432,7 +492,7 @@ export default function ReleasesPage() {
                             </div>
                           </td>
                           <td className="py-3 px-4 text-sm text-gray-600">
-                            {release.apple_id || '-'}
+                            {release.account_email || '-'}
                           </td>
                           <td className="py-3 px-4 text-sm text-gray-600">
                             {format(

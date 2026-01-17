@@ -40,7 +40,8 @@ export class SupabaseClient {
         version: release.version,
         build_number: release.build_number,
         is_first_release: release.is_first_release,
-        apple_id: release.apple_id,
+        account_email: release.account_email,
+        app_store_id: release.app_store_id,
         team_id: release.team_id,
         itc_team_id: release.itc_team_id,
         api_key_id: release.api_key_id,
@@ -403,7 +404,7 @@ export class SupabaseClient {
         accountMap.set(accountKey, {
           accountId: account?.id || null,
           accountName: account?.account_name || '未关联账号',
-          accountEmail: account?.apple_id || undefined,
+          accountEmail: account?.apple_id || undefined, // apple_id 是账号邮箱
           apps: [],
           stats: {
             total: 0,
@@ -498,7 +499,8 @@ export class SupabaseClient {
   async upsertAppleAccounts(accounts: Array<{
     hap_account_id: string;
     account_name: string;
-    apple_id: string;
+    account_email?: string;
+    app_store_id?: string | null;
     team_id: string;
     api_key_id: string;
     api_key_issuer_id: string;

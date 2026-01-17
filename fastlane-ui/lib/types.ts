@@ -129,7 +129,8 @@ export interface Release {
   version: string;
   build_number: string;
   is_first_release: boolean;
-  apple_id?: string;
+  account_email?: string; // Apple ID 邮箱
+  app_store_id?: string | null; // App Store ID（数字）
   team_id?: string;
   itc_team_id?: string;
   api_key_id?: string;

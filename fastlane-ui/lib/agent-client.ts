@@ -414,6 +414,40 @@ export class AgentClient {
   }
 
   // ============================================================================
+  // 外部审核同步 API（8.0 版本新增）
+  // ============================================================================
+
+  /**
+   * 同步外部提交的审核记录
+   */
+  async syncExternalReleases(): Promise<{
+    success: boolean;
+    data?: {
+      newCount: number;
+      existCount: number;
+      failCount: number;
+      failedApps: Array<{
+        appName: string;
+        version: string;
+        error: string;
+      }>;
+    };
+    error?: string;
+  }> {
+    const res = await fetch(`${this.baseUrl}/api/releases/sync-external`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || '同步外部审核失败');
+    }
+    
+    return res.json();
+  }
+
+  // ============================================================================
   // App 下架监控 API（3.5 版本新增）
   // ============================================================================
 

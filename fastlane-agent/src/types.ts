@@ -97,7 +97,8 @@ export interface Release {
   version: string;
   build_number: string;
   is_first_release: boolean;
-  apple_id?: string;
+  account_email?: string; // Apple ID 邮箱
+  app_store_id?: string | null; // App Store ID（数字）
   team_id?: string;
   itc_team_id?: string;
   api_key_id?: string;
@@ -241,5 +242,25 @@ export interface AccountGroup {
     unknown: number;
   };
   lastCheckedAt?: string;             // 该账号下最后检查时间
+}
+
+// ============================================================================
+// 外部审核同步相关类型（8.0 版本新增）
+// ============================================================================
+
+// 外部审核同步结果
+export interface ExternalReleaseSyncResult {
+  success: boolean;
+  data?: {
+    newCount: number;
+    existCount: number;
+    failCount: number;
+    failedApps: Array<{
+      appName: string;
+      version: string;
+      error: string;
+    }>;
+  };
+  error?: string;
 }
 

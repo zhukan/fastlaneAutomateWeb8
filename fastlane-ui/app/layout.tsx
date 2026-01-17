@@ -9,7 +9,7 @@ import { AuthGuard } from '@/components/auth-guard';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Fastlane UI',
+  title: 'Fastlane UI 8',
   description: 'iOS 应用发布管理界面',
 };
 
