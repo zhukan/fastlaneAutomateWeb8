@@ -27,6 +27,18 @@ export const APP_STATUS_KEYS = {
   MAINLAND_REMOVED: '5dfff3cf-9d01-4754-a592-075a2df34b9e',     // 大陆下架
 } as const;
 
+// "App生产发布"表 - 状态字段 Key 值（用于降级查询）
+// 注：此表有多个状态字段（打包状态、正式包状态等），这里列出所有可能的状态值
+export const PRODUCTION_RELEASE_STATUS_KEYS = {
+  PACKAGE_UPLOADED: '7f168c80-5cfe-480f-b23b-63bba5510d29',     // 已打包上传
+  FORMAL_REVIEWING: '37f6baa7-3045-49f7-b28a-fd340ced3ba8',     // 正式包审核中
+  FORMAL_ONLINE: 'cdd17013-5428-410f-88ae-26f9b4e269d0',        // 正式包上架
+  FORMAL_REJECTED: '0bd1c8ae-c96b-45d2-aa4d-f1c0f5f0e23f',      // 正式包审核不通过
+  RECYCLED: '0efd131c-58eb-4519-a670-c46e2b5c8aba',             // 回收
+  CANCEL_PUBLISH: '155e3ddd-8c53-4b89-87ed-79b34b6c0b44',       // 取消发布
+  APP_REMOVED: '15765c7b-9ecb-436c-a91c-bdd68ad96140',          // APP被下架
+} as const;
+
 export interface HapConfig {
   appKey: string;  // 明道云 AppKey（用于"账号上的产品"表和"苹果开发者账号"表）
   sign: string;    // 明道云 Sign
@@ -443,6 +455,10 @@ export class HapClient {
   /**
    * 查询"App生产发布"表（降级查询路径）
    * V3 API 筛选准确，通过 Bundle ID 直接查询
+   * 
+   * 注：为了最大化匹配率，降级查询仅按 Bundle ID 筛选，不筛选状态
+   * 因为"App生产发布"表的状态字段较复杂（包含多个状态字段），
+   * 且处于各种中间状态的记录也可能包含有效的账号信息
    */
   private async queryProductionReleaseByBundleId(bundleId: string): Promise<any | null> {
     try {
@@ -451,30 +467,13 @@ export class HapClient {
       const appKey = this.appKeyProductionReleases || this.appKey;
       const sign = this.signProductionReleases || this.sign;
       
-      // 允许的状态列表
-      const allowedStatuses = [
-        '待处理', '调试中', '调试完成', '已打包上传',
-        '正式包审核中', '正式包上架',
-        '白包审核中', '白包上架', '白包审核不通过'
-      ];
-      
+      // 简化筛选条件：只按 Bundle ID 查询
+      // 这样可以匹配任何状态的记录，提高查询成功率
       const filter = {
-        type: 'group',
-        logic: 'AND',
-        children: [
-          {
-            type: 'condition',
-            field: '64b168be624fef0d46c1105b', // Bundle ID 字段
-            operator: 'eq',
-            value: bundleId,
-          },
-          {
-            type: 'condition',
-            field: '64e35d9518064e34061e5e2e', // 状态字段
-            operator: 'in',
-            value: allowedStatuses,
-          }
-        ]
+        type: 'condition',
+        field: '64b168be624fef0d46c1105b', // Bundle ID 字段
+        operator: 'eq',
+        value: bundleId,
       };
       
       const { rows } = await this.v3GetRows(this.worksheetProductionReleases!, {
@@ -486,7 +485,13 @@ export class HapClient {
       
       if (rows.length > 0) {
         console.log(`[HAP] ✅ 降级查询找到 ${rows.length} 条记录`);
-        return rows[0];
+        // 优先返回最新的记录（按创建时间倒序）
+        const sortedRows = rows.sort((a, b) => {
+          const timeA = a._createdAt || a._updatedAt || '';
+          const timeB = b._createdAt || b._updatedAt || '';
+          return timeB.localeCompare(timeA);
+        });
+        return sortedRows[0];
       }
 
       console.log(`[HAP] ⚠️  降级查询未找到符合条件的记录`);
