@@ -130,7 +130,16 @@ export class AppRemovalMonitor {
           synced_from_hap_at: now,
         }));
 
-        const accountsUpserted = await this.supabaseClient.upsertAppleAccounts(accountsToUpsert);
+        // 去重：按 hap_account_id 去重（防止明道云返回重复数据）
+        const uniqueAccounts = Array.from(
+          new Map(accountsToUpsert.map(acc => [acc.hap_account_id, acc])).values()
+        );
+        
+        if (uniqueAccounts.length < accountsToUpsert.length) {
+          console.log(`[AppRemovalMonitor] ⚠️  检测到重复账号，已去重：${accountsToUpsert.length} → ${uniqueAccounts.length}`);
+        }
+
+        const accountsUpserted = await this.supabaseClient.upsertAppleAccounts(uniqueAccounts);
         console.log(`[AppRemovalMonitor] ✅ 步骤 1/2 完成：${accountsUpserted} 个账号已同步`);
       }
 
