@@ -290,17 +290,23 @@ export class TargetAppMonitorService {
       console.log(`[TargetAppMonitor] 📝 准备同步 ${hapRecords.length} 条记录`);
 
       // 查询所有已存在的记录，保留手动修改标记
+      // 使用分页查询确保获取所有记录
       const hapRowIds = hapRecords.map((record: any) => record.rowid || record.rowId);
-      const { data: existingApps } = await (this.supabaseClient as any).client
-        .from('target_apps')
-        .select('hap_row_id, manual_status_override')
-        .in('hap_row_id', hapRowIds);
-
-      // 构建手动修改标记映射
       const manualOverrideMap = new Map<string, boolean>();
-      existingApps?.forEach((app: any) => {
-        manualOverrideMap.set(app.hap_row_id, app.manual_status_override || false);
-      });
+      
+      // 分批查询（每批 500 个，避免 IN 子句过长）
+      const batchSize = 500;
+      for (let i = 0; i < hapRowIds.length; i += batchSize) {
+        const batchIds = hapRowIds.slice(i, i + batchSize);
+        const { data: batchData } = await (this.supabaseClient as any).client
+          .from('target_apps')
+          .select('hap_row_id, manual_status_override')
+          .in('hap_row_id', batchIds);
+        
+        batchData?.forEach((app: any) => {
+          manualOverrideMap.set(app.hap_row_id, app.manual_status_override || false);
+        });
+      }
 
       console.log(`[TargetAppMonitor] 🔒 目标包状态由系统自动维护，同步时不会覆盖状态字段`);
 
@@ -348,20 +354,49 @@ export class TargetAppMonitorService {
         return app;
       });
 
-      // 查询所有已存在的 app_id（用于去重）
-      const { data: existingAppsWithIds } = await (this.supabaseClient as any).client
-        .from('target_apps')
-        .select('app_id, hap_row_id')
-        .not('app_id', 'is', null);
+      // 查询所有已存在的 app_id 和 hap_row_id（用于去重）
+      // 使用分页查询确保获取所有记录（Supabase 默认限制 1000 条）
+      const existingAppIds = new Set<string>();
+      const existingHapRowIds = new Set<string>();
       
-      const existingAppIds = new Set(
-        existingAppsWithIds?.map((app: any) => app.app_id) || []
-      );
-      const existingHapRowIds = new Set(
-        existingAppsWithIds?.map((app: any) => app.hap_row_id) || []
-      );
+      {
+        let dbPageStart = 0;
+        const dbPageSize = 1000;
+        let dbHasMore = true;
+        
+        while (dbHasMore) {
+          const { data: dbPageData, error: dbPageError } = await (this.supabaseClient as any).client
+            .from('target_apps')
+            .select('app_id, hap_row_id')
+            .range(dbPageStart, dbPageStart + dbPageSize - 1);
+          
+          if (dbPageError) {
+            console.error(`[TargetAppMonitor] ⚠️  查询已存在记录失败: ${dbPageError.message}`);
+            break;
+          }
+          
+          if (!dbPageData || dbPageData.length === 0) {
+            dbHasMore = false;
+          } else {
+            dbPageData.forEach((app: any) => {
+              if (app.app_id) {
+                existingAppIds.add(app.app_id);
+              }
+              if (app.hap_row_id) {
+                existingHapRowIds.add(app.hap_row_id);
+              }
+            });
+            
+            if (dbPageData.length < dbPageSize) {
+              dbHasMore = false;
+            } else {
+              dbPageStart += dbPageSize;
+            }
+          }
+        }
+      }
       
-      console.log(`[TargetAppMonitor] 📊 数据库中已存在 ${existingAppIds.size} 个 app_id`);
+      console.log(`[TargetAppMonitor] 📊 数据库中已存在 ${existingAppIds.size} 个 app_id, ${existingHapRowIds.size} 个 hap_row_id`);
       
       // 分离新记录和更新记录
       const newApps: any[] = [];
@@ -446,6 +481,175 @@ export class TargetAppMonitorService {
       };
     } catch (error: any) {
       console.error('[TargetAppMonitor] ❌ 同步失败:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * 从明道云增量同步目标包列表到 Supabase（优化版本）
+   * @param days 可选参数，指定同步最近多少天的数据。0 或不传表示同步全部
+   * @returns 同步结果统计
+   */
+  async syncFromHapIncremental(days?: number): Promise<{ synced: number; inserted: number; updated: number }> {
+    console.log('[TargetAppMonitor] 🔄 开始增量同步目标包数据...');
+    
+    try {
+      const now = new Date().toISOString();
+      
+      // 计算时间范围
+      const daysToSync = days === 0 ? 0 : (days || parseInt(process.env.TARGET_APP_SYNC_DAYS || '5'));
+      let startDateStr = '';
+      
+      if (daysToSync > 0) {
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - daysToSync);
+        // 明道云时间格式: YYYY-MM-DD HH:mm:ss
+        startDateStr = startDate.toISOString().replace('T', ' ').substring(0, 19);
+        console.log(`[TargetAppMonitor] 📅 同步目标：最近 ${daysToSync} 天（${startDateStr} 至今）`);
+      } else {
+        console.log(`[TargetAppMonitor] 📅 同步目标：全部记录`);
+      }
+      
+      // 从明道云获取记录（带 filter）
+      console.log('[TargetAppMonitor] 📥 从明道云读取目标包列表...');
+      
+      const url = `https://api.mingdao.com/v3/app/worksheets/${this.HAP_WORKSHEET_ID}/rows/list`;
+      let allRecords: any[] = [];
+      let pageIndex = 1;
+      const pageSize = 1000;
+      let hasMore = true;
+      
+      while (hasMore) {
+        console.log(`[TargetAppMonitor] 📄 正在获取第 ${pageIndex} 页...`);
+        
+        // 构建请求体
+        const requestBody: any = {
+          pageSize: pageSize,
+          pageIndex: pageIndex,
+        };
+        
+        // 如果指定了天数，添加 filter
+        if (daysToSync > 0 && startDateStr) {
+          requestBody.filter = {
+            type: 'group',
+            logic: 'OR',
+            children: [
+              {
+                type: 'condition',
+                field: '_createdAt',
+                operator: 'gte',
+                value: startDateStr,
+              },
+              {
+                type: 'condition',
+                field: '_updatedAt',
+                operator: 'gte',
+                value: startDateStr,
+              },
+            ],
+          };
+        }
+        
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'HAP-Appkey': process.env.HAP_APP_KEY || '',
+            'HAP-Sign': process.env.HAP_SIGN || '',
+          },
+          body: JSON.stringify(requestBody),
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[TargetAppMonitor] ❌ API 错误响应:`, errorText);
+          throw new Error(`明道云 API 请求失败: HTTP ${response.status}`);
+        }
+        
+        const hapData: any = await response.json();
+        
+        // 解析响应数据
+        let pageRecords: any[] = [];
+        if (hapData.data && hapData.data.rows && Array.isArray(hapData.data.rows)) {
+          pageRecords = hapData.data.rows;
+        } else if (Array.isArray(hapData)) {
+          pageRecords = hapData;
+        } else if (hapData.rows && Array.isArray(hapData.rows)) {
+          pageRecords = hapData.rows;
+        } else {
+          console.error(`[TargetAppMonitor] ⚠️  未知的响应格式:`, JSON.stringify(hapData).substring(0, 500));
+        }
+        
+        console.log(`[TargetAppMonitor] 📄 第 ${pageIndex} 页获取到 ${pageRecords.length} 条记录`);
+        
+        allRecords = allRecords.concat(pageRecords);
+        
+        // 如果返回的记录数少于 pageSize，说明已经是最后一页
+        if (pageRecords.length < pageSize) {
+          hasMore = false;
+        } else {
+          pageIndex++;
+        }
+      }
+      
+      console.log(`[TargetAppMonitor] 📋 从明道云共获取到 ${allRecords.length} 条记录`);
+      
+      if (allRecords.length === 0) {
+        console.log(`[TargetAppMonitor] ℹ️  没有需要同步的记录`);
+        return { synced: 0, inserted: 0, updated: 0 };
+      }
+      
+      // 转换为 Supabase 格式
+      console.log(`[TargetAppMonitor] 🔄 转换数据格式...`);
+      const appsToSync = allRecords.map((record: any) => {
+        const hapRowId = record.rowid || record.rowId;
+        
+        return {
+          hap_row_id: hapRowId,
+          app_name: record[this.FIELD_IDS.appName] || '未命名',
+          app_id: record[this.FIELD_IDS.appId] || null,
+          app_store_link: record[this.FIELD_IDS.appStoreLink] || null,
+          qimai_link: record[this.FIELD_IDS.qimaiLink] || null,
+          keyword_search_link: record[this.FIELD_IDS.keywordSearchLink] || null,
+          is_monitoring: record[this.FIELD_IDS.isMonitoring] === 1 || record[this.FIELD_IDS.isMonitoring] === '1' || record[this.FIELD_IDS.isMonitoring] === true,
+          source: record[this.FIELD_IDS.source] || null,
+          remark: record[this.FIELD_IDS.remark] || null,
+          created_at: record.ctime || record._createdAt || now,
+          updated_at: record.utime || record._updatedAt || now,
+          synced_from_hap_at: now,
+          sync_hostname: hostname(),
+          manual_status_override: false, // 新记录默认不是手动修改
+        };
+      });
+      
+      // 直接 upsert 到数据库
+      console.log(`[TargetAppMonitor] 💾 同步到数据库...`);
+      const { data, error } = await (this.supabaseClient as any).client
+        .from('target_apps')
+        .upsert(appsToSync, {
+          onConflict: 'hap_row_id',
+          ignoreDuplicates: false,
+        });
+      
+      if (error) {
+        console.error(`[TargetAppMonitor] ❌ 同步失败: ${error.message}`);
+        throw new Error(`同步失败: ${error.message}`);
+      }
+      
+      // Supabase upsert 不返回插入/更新的具体数量，我们只能返回总数
+      const synced = allRecords.length;
+      
+      console.log(`[TargetAppMonitor] ✅ 同步完成:`);
+      console.log(`  - 处理记录: ${synced} 条`);
+      console.log(`  - 操作类型: upsert (插入新记录或更新已存在记录)`);
+      
+      return {
+        synced: synced,
+        inserted: 0, // Supabase 不返回具体数量
+        updated: 0,  // Supabase 不返回具体数量
+      };
+    } catch (error: any) {
+      console.error('[TargetAppMonitor] ❌ 增量同步失败:', error.message);
       throw error;
     }
   }

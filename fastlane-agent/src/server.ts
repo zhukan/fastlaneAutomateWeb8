@@ -1088,7 +1088,8 @@ export class FastlaneAgentServer {
 
       try {
         const { days } = req.body; // 可选的天数参数
-        const result = await this.targetAppMonitor.syncFromHap(days);
+        // 使用新的增量同步方法
+        const result = await this.targetAppMonitor.syncFromHapIncremental(days);
         res.json(result);
       } catch (error: any) {
         console.error('[API] ❌ 同步目标包失败:', error.message);
@@ -1192,9 +1193,9 @@ export class FastlaneAgentServer {
 
       try {
         const { days } = req.body; // 可选的天数参数
-        // 先同步数据
+        // 先同步数据（使用新的增量同步方法）
         console.log('[API] 🔄 开始同步并检查目标包...');
-        const syncResult = await this.targetAppMonitor.syncFromHap(days);
+        const syncResult = await this.targetAppMonitor.syncFromHapIncremental(days);
         console.log(`[API] ✅ 同步完成: ${syncResult.synced} 条记录`);
         
         // 再异步执行检查
