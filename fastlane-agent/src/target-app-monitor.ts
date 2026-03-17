@@ -622,6 +622,44 @@ export class TargetAppMonitorService {
         };
       });
       
+      // 查询 Supabase 现有的 app_id → hap_row_id 映射，用于检测幽灵记录
+      const { data: existingApps } = await (this.supabaseClient as any).client
+        .from('target_apps')
+        .select('app_id, hap_row_id')
+        .not('app_id', 'is', null);
+
+      const existingAppIdMap = new Map<string, string>(); // app_id → hap_row_id
+      for (const r of existingApps ?? []) {
+        existingAppIdMap.set(r.app_id, r.hap_row_id);
+      }
+
+      // 收集「HAP 有新 hap_row_id，但 Supabase 里同 app_id 用的是旧 hap_row_id」的幽灵记录
+      // 原因：明道云里该记录被删除后重新创建，hap_row_id 变了，Supabase 里的旧记录变成孤儿
+      const orphanHapRowIds: string[] = [];
+      for (const app of appsToSync) {
+        if (!app.app_id) continue;
+        const existingHapRowId = existingAppIdMap.get(app.app_id);
+        if (existingHapRowId && existingHapRowId !== app.hap_row_id) {
+          orphanHapRowIds.push(existingHapRowId);
+          console.log(`[TargetAppMonitor] 🧹 检测到幽灵记录: app_id=${app.app_id} app_name=${app.app_name}`);
+          console.log(`   旧 hap_row_id=${existingHapRowId}（已从明道云删除），新 hap_row_id=${app.hap_row_id}`);
+        }
+      }
+
+      // 删除幽灵记录，为新记录腾位置
+      if (orphanHapRowIds.length > 0) {
+        console.log(`[TargetAppMonitor] 🧹 删除 ${orphanHapRowIds.length} 条幽灵记录...`);
+        const { error: deleteError } = await (this.supabaseClient as any).client
+          .from('target_apps')
+          .delete()
+          .in('hap_row_id', orphanHapRowIds);
+        if (deleteError) {
+          console.error(`[TargetAppMonitor] ❌ 删除幽灵记录失败: ${deleteError.message}`);
+        } else {
+          console.log(`[TargetAppMonitor] ✅ 幽灵记录已清理`);
+        }
+      }
+
       // 直接 upsert 到数据库
       console.log(`[TargetAppMonitor] 💾 同步到数据库...`);
       const { data, error } = await (this.supabaseClient as any).client
@@ -636,11 +674,11 @@ export class TargetAppMonitorService {
         throw new Error(`同步失败: ${error.message}`);
       }
       
-      // Supabase upsert 不返回插入/更新的具体数量，我们只能返回总数
-      const synced = allRecords.length;
-      
+      const synced = appsToSync.length;
+
       console.log(`[TargetAppMonitor] ✅ 同步完成:`);
       console.log(`  - 处理记录: ${synced} 条`);
+      if (orphanHapRowIds.length > 0) console.log(`  - 清理幽灵记录: ${orphanHapRowIds.length} 条`);
       console.log(`  - 操作类型: upsert (插入新记录或更新已存在记录)`);
       
       return {
